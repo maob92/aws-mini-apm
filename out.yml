@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: An AWS Lambda application that uses Amazon Kinesis and Amazon RDS.
+Transform: AWS::Serverless-2016-10-31
+Parameters:
+  vpcStackName:
+    Default: ben-mini-apm-vpc
+    Description: VPC and database stack name
+    Type: String
+Globals:
+  Function:
+    Runtime: nodejs12.x
+    Tracing: Active
+    Handler: index.handler
+    AutoPublishAlias: live
+    Environment:
+      Variables:
+        table:
+          Ref: table
+        aggtable:
+          Ref: aggtable
+        databaseHost:
+          Fn::ImportValue:
+            Fn::Sub: ${vpcStackName}-db-host
+        databaseName:
+          Fn::ImportValue:
+            Fn::Sub: ${vpcStackName}-db-name
+        databaseUser:
+          Fn::ImportValue:
+            Fn::Sub: ${vpcStackName}-db-user
+        databasePassword: '{{resolve:secretsmanager:ben-mini-apm:SecretString:password}}'
+    VpcConfig:
+      SecurityGroupIds:
+      - Fn::ImportValue:
+          Fn::Sub: ${vpcStackName}-vpc-sg
+      SubnetIds:
+      - Fn::ImportValue:
+          Fn::Sub: ${vpcStackName}-subnet-a
+      - Fn::ImportValue:
+          Fn::Sub: ${vpcStackName}-subnet-b
+    DeploymentPreference:
+      Type: AllAtOnce
+      Role:
+        Fn::GetAtt:
+        - deployrole
+        - Arn
+    Layers:
+    - Ref: libs
+Resources:
+  deployrole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codedeploy.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRoleForLambda
+  libs:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: ben-mini-apm-lib
+      Description: Dependencies for the list manager sample app.
+      ContentUri: s3://lambda-artifacts-b915c74490f69b14/7d414f96aca1885a19b32ed07f4d306c
+      CompatibleRuntimes:
+      - nodejs12.x
+  dbadmin:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://lambda-artifacts-b915c74490f69b14/ae5d7464179e408c2d52087daed31e03
+      Description: Run SQL queries.
+      MemorySize: 128
+      Timeout: 15
+      Policies:
+      - AWSLambdaBasicExecutionRole
+      - AWSLambdaVPCAccessExecutionRole
+  processor:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://lambda-artifacts-b915c74490f69b14/72b3c4085068f124730819a7787cd362
+      Description: Process events from Amazon Kinesis
+      MemorySize: 128
+      Timeout: 100
+      Policies:
+      - AWSLambdaBasicExecutionRole
+      - AWSLambdaKinesisExecutionRole
+      - AmazonDynamoDBFullAccess
+      - AWSLambdaVPCAccessExecutionRole
+      Events:
+        kinesis:
+          Type: Kinesis
+          Properties:
+            Stream:
+              Fn::GetAtt:
+              - stream
+              - Arn
+            BatchSize: 100
+            StartingPosition: LATEST
+  stream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      ShardCount: 1
+  table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: id
+        AttributeType: S
+      - AttributeName: aggid
+        AttributeType: S
+      KeySchema:
+      - AttributeName: aggid
+        KeyType: HASH
+      - AttributeName: id
+        KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: '2'
+        WriteCapacityUnits: '2'
+  aggtable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: id
+        Type: String
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
